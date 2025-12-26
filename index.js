@@ -1,7 +1,7 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
-const { PubSub } = require('@google-cloud/pubsub');
+const { PubSub, v1 } = require('@google-cloud/pubsub');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -87,7 +87,7 @@ app.delete('/push/:id', (req, res) => {
 
 // ============ PULL ENDPOINTS (Pull from Google Pub/Sub) ============
 
-// POST - manually trigger pull from Google Pub/Sub
+// POST - manually trigger pull from Google Pub/Sub (synchronous pull)
 app.post('/pull', async (req, res) => {
   if (!PROJECT_ID) {
     return res.status(400).json({
@@ -97,47 +97,60 @@ app.post('/pull', async (req, res) => {
   }
 
   try {
-    const pubsub = new PubSub({ projectId: PROJECT_ID });
-    const subscription = pubsub.subscription(SUBSCRIPTION_NAME);
+    const subClient = new v1.SubscriberClient();
+    const subscriptionPath = `projects/${PROJECT_ID}/subscriptions/${SUBSCRIPTION_NAME}`;
 
-    // Pull messages (max 10 at a time)
-    const [messages] = await subscription.pull({ maxMessages: 10 });
+    // Pull messages using v1 API
+    const [response] = await subClient.pull({
+      subscription: subscriptionPath,
+      maxMessages: 10,
+    });
+
+    const messages = response.receivedMessages || [];
 
     if (messages.length === 0) {
+      await subClient.close();
       return res.json({ message: 'No new messages', pulled: 0 });
     }
 
     const pulledEntries = [];
     const ackIds = [];
 
-    for (const message of messages) {
-      const id = Date.now().toString() + '-' + message.id;
+    for (const msg of messages) {
+      const id = Date.now().toString() + '-' + msg.message.messageId;
 
       let decodedData;
       try {
-        decodedData = JSON.parse(message.data.toString('utf8'));
+        const dataStr = msg.message.data.toString('utf8');
+        decodedData = JSON.parse(dataStr);
       } catch (e) {
-        decodedData = message.data.toString('utf8');
+        decodedData = msg.message.data.toString('utf8');
       }
 
       const entry = {
         id,
         type: 'pull',
-        messageId: message.id,
+        messageId: msg.message.messageId,
         data: decodedData,
-        attributes: message.attributes,
-        publishTime: message.publishTime,
+        attributes: msg.message.attributes,
+        publishTime: msg.message.publishTime,
         pulledAt: new Date().toISOString()
       };
 
       pullStore.push(entry);
       pulledEntries.push(entry);
-      ackIds.push(message.ackId);
+      ackIds.push(msg.ackId);
     }
 
     // Acknowledge messages so they don't get pulled again
-    await subscription.ack(ackIds);
+    if (ackIds.length > 0) {
+      await subClient.acknowledge({
+        subscription: subscriptionPath,
+        ackIds: ackIds,
+      });
+    }
 
+    await subClient.close();
     saveData(PULL_DATA_FILE, pullStore);
 
     res.json({
