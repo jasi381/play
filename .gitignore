@@ -2,7 +2,9 @@ node_modules
 data.json
 push-data.json
 pull-data.json
+subscriptions-data.json
 .idea
 .DS_Store
 *.pem
+*.png
 credentials.json
